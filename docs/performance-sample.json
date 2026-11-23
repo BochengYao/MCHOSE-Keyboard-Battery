@@ -1,0 +1,12 @@
+{
+  "Version": "1.4-preview",
+  "SampleSeconds": 36.5,
+  "CPUMilliseconds": 0.0,
+  "WholeMachineCPUPercent": 0.0,
+  "WorkingMemoryMB_Min": 14.78,
+  "WorkingMemoryMB_Max": 14.79,
+  "PrivateMemoryMB_Max": 3.05,
+  "Handles_Min": 183.0,
+  "Handles_Max": 183.0,
+  "Threads": 4
+}

@@ -1,0 +1,15 @@
+/build/
+/dist/
+*.obj
+*.o
+*.res
+*.pdb
+*.ilk
+*.exe
+*.zip
+probe-result.txt
+device-inventory.txt
+最近读取.txt
+menu-*.bmp
+.DS_Store
+Thumbs.db
