@@ -1,0 +1,12 @@
+{
+  "Version": "1.4.0-preview.2",
+  "Condition": "After using and closing unified GDI color settings",
+  "SampleSeconds": 36.5,
+  "CPUMilliseconds": 0.0,
+  "WorkingMemoryMB_Min": 14.85,
+  "WorkingMemoryMB_Max": 14.88,
+  "PrivateMemoryMB_Max": 3.07,
+  "Handles_Min": 182.0,
+  "Handles_Max": 183.0,
+  "Threads": 5
+}

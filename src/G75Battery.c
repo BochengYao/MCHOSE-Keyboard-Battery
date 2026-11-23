@@ -19,6 +19,7 @@
 #define ID_STARTUP 2
 #define ID_HELP 3
 #define ID_EXIT 4
+#define ID_COLORS 6
 typedef struct { BOOL ok,charging,chargingKnown,cached; int percent,protocol; wchar_t model[64],connection[24],error[96]; BYTE raw[65]; } Reading;
 static HWND window;
 static HANDLE stopEvent,refreshEvent,worker;
@@ -41,6 +42,7 @@ static UINT MonitorDpi(HMONITOR monitor) {
     if(lib) {GetMonitorDpiFn fn=(GetMonitorDpiFn)(void*)GetProcAddress(lib,"GetDpiForMonitor");if(fn) fn(monitor,0,&x,&y);FreeLibrary(lib);}
     return x>=96 && x<=768?x:96;
 }
+#include "ColorSettings.h"
 
 static BOOL Parse(const BYTE *b,DWORD count,Reading *r) {
     if(count!=65 || b[0]!=0 || b[1]!=0xaa || b[2]!=5 || b[3]!=0 || b[5]!=1 || b[6]!=32 || b[7]!=0 || b[8]!=0) return FALSE;
@@ -108,7 +110,7 @@ static void UpdateTray(const Reading *r,BOOL force) {
     HICON previous=NULL;
     if(next!=iconIndex || !icon || iconDpi!=dpi) {
         int size=MulDiv(16,(int)dpi,96);
-        HICON fresh=(HICON)LoadImageW(instance,MAKEINTRESOURCEW(1000+next),IMAGE_ICON,size,size,LR_DEFAULTCOLOR);
+        HICON fresh=LoadTrayIcon(next,size);
         if(!fresh) return;
         previous=icon;icon=fresh;iconIndex=next;iconDpi=dpi;
     }
@@ -125,6 +127,7 @@ static void AddTray(void) {
     tray.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP|NIF_SHOWTIP;tray.hIcon=icon;Shell_NotifyIconW(NIM_ADD,&tray);tray.uVersion=NOTIFYICON_VERSION_4;Shell_NotifyIconW(NIM_SETVERSION,&tray);
 }
 #include "TrayMenu.h"
+#include "ColorDialog.h"
 static LRESULT CALLBACK WindowProc(HWND h,UINT msg,WPARAM wp,LPARAM lp) {
     if(taskbarCreated && msg==taskbarCreated) {AddTray();if(hasReading) UpdateTray(&lastReading,TRUE);return 0;}
     switch(msg) {
@@ -143,11 +146,12 @@ static LRESULT CALLBACK WindowProc(HWND h,UINT msg,WPARAM wp,LPARAM lp) {
         case ID_STARTUP:ToggleStartup();break;
         case ID_HELP: {wchar_t path[MAX_PATH];_snwprintf(path,MAX_PATH,L"%ls使用说明.txt",folder);ShellExecuteW(h,L"open",path,NULL,NULL,SW_SHOWNORMAL);break;}
         case ID_EXIT:DestroyWindow(h);break;
+        case ID_COLORS:ShowColorSettings();break;
         case 5:ShowMenu();break;
         }
         return 0;
     case WM_CLOSE:DestroyWindow(h);return 0;
-    case WM_DESTROY:if(menuWindow) DestroyWindow(menuWindow);KillTimer(h,1);SetEvent(stopEvent);PostQuitMessage(0);return 0;
+    case WM_DESTROY:if(menuWindow) DestroyWindow(menuWindow);if(colorWindow) DestroyWindow(colorWindow);KillTimer(h,1);SetEvent(stopEvent);PostQuitMessage(0);return 0;
     }
     return DefWindowProcW(h,msg,wp,lp);
 }
@@ -167,12 +171,13 @@ static int SelfTest(void) {
 }
 int WINAPI wWinMain(HINSTANCE inst,HINSTANCE previous,LPWSTR command,int show) {
     (void)previous;(void)show;instance=inst;GetModuleFileNameW(NULL,exePath,MAX_PATH);wcscpy(folder,exePath);wchar_t *slash=wcsrchr(folder,L'\\');if(slash) slash[1]=0;
-    if(wcscmp(command,L"--self-test")==0) {int code=SelfTest();return code?code:AdapterSelfTest();}
+    if(wcscmp(command,L"--self-test")==0) {int code=SelfTest();if(!code) code=AdapterSelfTest();if(!code) code=ColorSelfTest();if(code) return code;return HSVColor(0,1,1)==RGB(255,0,0) && HSVColor(120,1,1)==RGB(0,255,0) && HSVColor(240,1,1)==RGB(0,0,255) && HSVColor(0,0,1)==RGB(255,255,255) && HSVColor(0,1,0)==RGB(0,0,0)?0:56;}
     if(wcsncmp(command,L"--preview-menu ",15)==0) return PreviewMenu((UINT)_wtoi(command+15));
     stopEvent=CreateEventW(NULL,TRUE,FALSE,NULL);refreshEvent=CreateEventW(NULL,FALSE,FALSE,NULL);if(!stopEvent || !refreshEvent) return 10;
     if(wcscmp(command,L"--probe")==0 || wcscmp(command,L"--bluetooth-probe")==0) {Reading r=wcscmp(command,L"--bluetooth-probe")==0?QueryBluetooth():Query();if(!r.ok && !r.error[0]) wcscpy(r.error,L"Windows 未提供可读取的迈从蓝牙电量");WriteDiagnostic(&r,L"probe-result.txt");CloseHandle(stopEvent);CloseHandle(refreshEvent);return r.ok?0:11;}
     if(wcscmp(command,L"--inventory")==0) {WriteInventory();CloseHandle(stopEvent);CloseHandle(refreshEvent);return 0;}
     HANDLE mutex=CreateMutexW(NULL,TRUE,L"Local\\G75Battery-3837-3033");if(!mutex || GetLastError()==ERROR_ALREADY_EXISTS) {if(mutex) CloseHandle(mutex);CloseHandle(stopEvent);CloseHandle(refreshEvent);return 0;}
+    LoadColorSettings();
     SetDpiContextFn setDpi=(SetDpiContextFn)(void*)GetProcAddress(GetModuleHandleW(L"user32.dll"),"SetProcessDpiAwarenessContext");
     if(setDpi) setDpi((HANDLE)(INT_PTR)-4);else SetProcessDPIAware();
     taskbarCreated=RegisterWindowMessageW(L"TaskbarCreated");
@@ -184,7 +189,7 @@ int WINAPI wWinMain(HINSTANCE inst,HINSTANCE previous,LPWSTR command,int show) {
     icon=(HICON)LoadImageW(inst,MAKEINTRESOURCEW(1102),IMAGE_ICON,GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),0);iconIndex=102;wcscpy(tray.szTip,L"迈从键盘 · 正在读取");AddTray();
     worker=CreateThread(NULL,128*1024,Worker,NULL,STACK_SIZE_PARAM_IS_A_RESERVATION,NULL);
     if(!worker) {DestroyWindow(window);} else {SetTimer(window,1,30000,NULL);SetEvent(refreshEvent);}
-    MSG message;while(GetMessageW(&message,NULL,0,0)>0) {TranslateMessage(&message);DispatchMessageW(&message);}
+    MSG message;while(GetMessageW(&message,NULL,0,0)>0) {if(colorWindow && IsDialogMessageW(colorWindow,&message)) continue;TranslateMessage(&message);DispatchMessageW(&message);}
     SetEvent(stopEvent);if(worker) {WaitForSingleObject(worker,INFINITE);CloseHandle(worker);}
     while(PeekMessageW(&message,NULL,WM_READING,WM_READING,PM_REMOVE)) HeapFree(GetProcessHeap(),0,(void*)message.lParam);
     Shell_NotifyIconW(NIM_DELETE,&tray);if(icon) DestroyIcon(icon);CloseHandle(stopEvent);CloseHandle(refreshEvent);CloseHandle(mutex);return 0;
