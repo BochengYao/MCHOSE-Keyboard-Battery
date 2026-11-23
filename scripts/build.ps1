@@ -59,7 +59,7 @@ try {
         if (-not (Get-Command rc.exe -ErrorAction SilentlyContinue)) { throw 'Windows SDK resource compiler rc.exe was not found.' }
         $resource = Join-Path $OutDir 'G75Battery.res'
         Invoke-Checked 'rc.exe' @('/nologo','/fo',$resource,'G75Battery.rc')
-        Invoke-Checked 'cl.exe' @('/nologo','/utf-8','/std:c11','/TC','/O1','/MT','/W4','/D_CRT_SECURE_NO_WARNINGS',('/Fo' + (Join-Path $OutDir 'G75Battery.obj')),'G75Battery.c',$resource,('/Fe' + (Join-Path $OutDir 'G75Battery.exe')),'/link','/SUBSYSTEM:WINDOWS','/MACHINE:X64','/DYNAMICBASE','/HIGHENTROPYVA','/NXCOMPAT','setupapi.lib','hid.lib','shell32.lib','advapi32.lib','user32.lib','gdi32.lib','kernel32.lib','cfgmgr32.lib')
+        Invoke-Checked 'cl.exe' @('/nologo','/utf-8','/std:c11','/O1','/MT','/W4','/D_CRT_SECURE_NO_WARNINGS',('/Fo' + (Join-Path $OutDir 'G75Battery.obj')),'G75Battery.c',$resource,('/Fe' + (Join-Path $OutDir 'G75Battery.exe')),'/link','/SUBSYSTEM:WINDOWS','/MACHINE:X64','/DYNAMICBASE','/HIGHENTROPYVA','/NXCOMPAT','setupapi.lib','hid.lib','shell32.lib','advapi32.lib','user32.lib','gdi32.lib','kernel32.lib','cfgmgr32.lib')
     }
 } finally {
     Pop-Location
