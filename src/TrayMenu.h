@@ -38,8 +38,10 @@ static void PaintMenu(HDC dc) {
     Text(dc,hasReading && lastReading.model[0]?lastReading.model:L"迈从键盘",16,12,230,24,menuTitleFont,menuInk,DT_LEFT|DT_END_ELLIPSIS);
     SelectObject(dc,status);SelectObject(dc,GetStockObject(NULL_PEN));Ellipse(dc,Px(17),Px(45),Px(23),Px(51));
     wchar_t label[96];
-    if(!hasReading) wcscpy(label,L"正在读取电量…");
+    if(!hasReading) wcscpy(label,L"等待键盘输入 · 点击可手动读取");
     else if(!lastReading.ok) wcscpy(label,L"暂无读数 · 点击刷新重试");
+    else if(lastReading.stale && lastReading.charging) wcscpy(label,L"上次状态：充电 · 按键后更新");
+    else if(lastReading.stale) _snwprintf(label,96,L"上次读数 %d%% · 按键后更新",lastReading.percent);
     else if(lastReading.cached) _snwprintf(label,96,L"%d%% · 蓝牙系统缓存，状态未确认",lastReading.percent);
     else if(lastReading.charging) wcscpy(label,L"正在充电");
     else _snwprintf(label,96,L"%d%% · %ls",lastReading.percent,lastReading.connection[0]?lastReading.connection:L"电池供电");

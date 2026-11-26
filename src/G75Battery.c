@@ -20,7 +20,7 @@
 #define ID_HELP 3
 #define ID_EXIT 4
 #define ID_COLORS 6
-typedef struct { BOOL ok,charging,chargingKnown,cached; int percent,protocol; wchar_t model[64],connection[24],error[96]; BYTE raw[65]; } Reading;
+typedef struct { BOOL ok,charging,chargingKnown,cached,stale; int percent,protocol; wchar_t model[64],connection[24],error[96]; BYTE raw[65]; } Reading;
 static HWND window;
 static HANDLE stopEvent,refreshEvent,worker;
 static HINSTANCE instance;
@@ -43,6 +43,7 @@ static UINT MonitorDpi(HMONITOR monitor) {
     return x>=96 && x<=768?x:96;
 }
 #include "ColorSettings.h"
+#include "RefreshPolicy.h"
 
 static BOOL Parse(const BYTE *b,DWORD count,Reading *r) {
     if(count!=65 || b[0]!=0 || b[1]!=0xaa || b[2]!=5 || b[3]!=0 || b[5]!=1 || b[6]!=32 || b[7]!=0 || b[8]!=0) return FALSE;
@@ -53,6 +54,8 @@ static BOOL Parse(const BYTE *b,DWORD count,Reading *r) {
 static void Tip(const Reading *r,wchar_t *out,size_t n) {
     const wchar_t *name=r->model[0]?r->model:L"迈从键盘";
     if(!r->ok) _snwprintf(out,n,L"迈从键盘 · %ls",r->error);
+    else if(r->stale && r->charging) _snwprintf(out,n,L"%ls · 上次状态：充电 · 按键或点击后更新",name);
+    else if(r->stale) _snwprintf(out,n,L"%ls · 上次读数 %d%% · 按键或点击后更新",name,r->percent);
     else if(r->cached) _snwprintf(out,n,L"%ls · %d%% · 蓝牙系统缓存（连接和充电状态未确认）",name,r->percent);
     else if(r->charging) _snwprintf(out,n,L"%ls · 正在充电（不显示充电百分比）",name);
     else _snwprintf(out,n,L"%ls · %d%% · %ls",name,r->percent,r->connection[0]?r->connection:L"电池供电");
@@ -65,7 +68,7 @@ static void WriteDiagnostic(const Reading *r,const wchar_t *name) {
     if(r->ok) _snwprintf(detail,320,L"原始上报=%d%% 充电标志=%d 充电状态已知=%d 缓存=%d 协议=%d\r\n原始应答=%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X",r->percent,r->charging,r->chargingKnown,r->cached,r->protocol,r->raw[1],r->raw[2],r->raw[3],r->raw[4],r->raw[5],r->raw[6],r->raw[7],r->raw[8],r->raw[9]);
     else wcscpy(detail,L"未取得有效电量，无百分比读数");
     detail[319]=0;
-    _snwprintf(text,768,L"迈从键盘电量助手 1.4 · 多协议预览版\r\n%04u-%02u-%02u %02u:%02u:%02u\r\n托盘提示=%ls\r\n%ls\r\n仅在状态变化时写入此文件\r\n",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond,tip,detail);text[767]=0;
+    _snwprintf(text,768,L"迈从键盘电量助手 1.4.0-preview.3 · 不定时询问键盘\r\n%04u-%02u-%02u %02u:%02u:%02u\r\n托盘提示=%ls\r\n%ls\r\n仅在状态变化时写入此文件\r\n",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond,tip,detail);text[767]=0;
     int len=WideCharToMultiByte(CP_UTF8,0,text,-1,utf8,sizeof(utf8),NULL,NULL);
     if(len<=0) return;
     HANDLE f=CreateFileW(path,GENERIC_WRITE,FILE_SHARE_READ,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);
@@ -74,8 +77,14 @@ static void WriteDiagnostic(const Reading *r,const wchar_t *name) {
 static DWORD WINAPI Worker(void *unused) {
     HANDLE events[2]={stopEvent,refreshEvent};(void)unused;
     while(WaitForMultipleObjects(2,events,FALSE,INFINITE)==WAIT_OBJECT_0+1) {
+        LONG reasons=InterlockedExchange(&refreshReasons,0);if(!reasons) continue;
+        queryExplicit=(reasons&REFRESH_MANUAL)!=0;
+        AcquireSRWLockShared(&inputLock);queryContainer=lastKeyboardContainer;queryHasContainer=lastKeyboardInput!=0;ReleaseSRWLockShared(&inputLock);
+        if(!DeviceQueryAllowed()) {InterlockedIncrement64(&expiredInputQueries);continue;}
+        if(queryExplicit) InterlockedIncrement64(&manualQueries);else InterlockedIncrement64(&inputQueries);
         Reading *r=(Reading*)HeapAlloc(GetProcessHeap(),0,sizeof(Reading));if(!r) continue;
         *r=Query();
+        if(!queryExplicit && !r->ok && !DeviceQueryAllowed()) {InterlockedIncrement64(&expiredInputQueries);HeapFree(GetProcessHeap(),0,r);continue;}
         if(WaitForSingleObject(stopEvent,0)==WAIT_OBJECT_0 || !PostMessageW(window,WM_READING,0,(LPARAM)r)) HeapFree(GetProcessHeap(),0,r);
     }
     return 0;
@@ -101,7 +110,7 @@ static void ToggleStartup(void) {
 }
 static void UpdateTray(const Reading *r,BOOL force) {
     int next=DisplayIcon(r);
-    BOOL changed=!hasReading || r->ok!=lastReading.ok || (r->ok && (wcscmp(r->model,lastReading.model)!=0 || wcscmp(r->connection,lastReading.connection)!=0 || r->cached!=lastReading.cached || r->charging!=lastReading.charging || (!r->charging && r->percent!=lastReading.percent))) || (!r->ok && wcscmp(r->error,lastReading.error)!=0);
+    BOOL changed=!hasReading || r->ok!=lastReading.ok || (r->ok && (wcscmp(r->model,lastReading.model)!=0 || wcscmp(r->connection,lastReading.connection)!=0 || r->stale!=lastReading.stale || r->cached!=lastReading.cached || r->charging!=lastReading.charging || (!r->charging && r->percent!=lastReading.percent))) || (!r->ok && wcscmp(r->error,lastReading.error)!=0);
     NOTIFYICONIDENTIFIER identity={0};RECT trayRect;identity.cbSize=sizeof(identity);identity.hWnd=window;identity.uID=1;
     HMONITOR monitor=MonitorFromWindow(window,MONITOR_DEFAULTTOPRIMARY);
     if(SUCCEEDED(Shell_NotifyIconGetRect(&identity,&trayRect))) monitor=MonitorFromRect(&trayRect,MONITOR_DEFAULTTOPRIMARY);
@@ -116,7 +125,7 @@ static void UpdateTray(const Reading *r,BOOL force) {
     }
     tray.uFlags=NIF_ICON|NIF_TIP|NIF_SHOWTIP;tray.hIcon=icon;Tip(r,tray.szTip,128);Shell_NotifyIconW(NIM_MODIFY,&tray);
     if(previous) DestroyIcon(previous);
-    if(r->ok && !r->cached && !r->charging && r->percent<=20 && (!lowWarned || GetTickCount64()-lastWarning>=3600000)) {
+    if(r->ok && !r->stale && !r->cached && !r->charging && r->percent<=20 && (!lowWarned || GetTickCount64()-lastWarning>=3600000)) {
         tray.uFlags=NIF_INFO;wcscpy(tray.szInfoTitle,L"键盘电量偏低");_snwprintf(tray.szInfo,256,L"%ls 剩余 %d%%，可以充电了。",r->model,r->percent);tray.dwInfoFlags=NIIF_WARNING;Shell_NotifyIconW(NIM_MODIFY,&tray);lowWarned=TRUE;lastWarning=GetTickCount64();
     }
     if(r->ok && (r->charging || r->percent>=25)) lowWarned=FALSE;
@@ -131,18 +140,27 @@ static void AddTray(void) {
 static LRESULT CALLBACK WindowProc(HWND h,UINT msg,WPARAM wp,LPARAM lp) {
     if(taskbarCreated && msg==taskbarCreated) {AddTray();if(hasReading) UpdateTray(&lastReading,TRUE);return 0;}
     switch(msg) {
-    case WM_TIMER:SetEvent(refreshEvent);return 0;
-    case WM_READING: {Reading *r=(Reading*)lp;UpdateTray(r,FALSE);HeapFree(GetProcessHeap(),0,r);return 0;}
-    case WM_DEVICECHANGE:case WM_POWERBROADCAST: InterlockedExchange(&scanRequested,TRUE);SetEvent(refreshEvent);return DefWindowProcW(h,msg,wp,lp);
+    case WM_TIMER:
+        InterlockedIncrement64(&timerTicks);
+        if(hasReading && lastReading.ok && !lastReading.stale && GetTickCount64()-lastReadingTick>35000) {Reading previous=lastReading;previous.stale=TRUE;UpdateTray(&previous,FALSE);}return 0;
+    case WM_READING: {Reading *r=(Reading*)lp;lastReadingTick=GetTickCount64();UpdateTray(r,FALSE);StoreLastReading(r);HeapFree(GetProcessHeap(),0,r);return 0;}
+    case WM_INPUT:ObserveKeyboardHeader((HRAWINPUT)lp);return DefWindowProcW(h,msg,wp,lp);
+    case WM_INPUT_DEVICE_CHANGE:ZeroMemory(keyboardSources,sizeof(keyboardSources));lastAutomaticRequest=0;InterlockedExchange(&scanRequested,TRUE);return 0;
+    case WM_DEVICECHANGE:InterlockedExchange(&scanRequested,TRUE);return DefWindowProcW(h,msg,wp,lp);
+    case WM_POWERBROADCAST:
+        if(wp==PBT_APMSUSPEND) {InterlockedExchange(&systemSuspended,TRUE);InterlockedExchange(&refreshReasons,0);AcquireSRWLockExclusive(&inputLock);lastKeyboardInput=0;ReleaseSRWLockExclusive(&inputLock);}
+        else if(wp==PBT_APMRESUMEAUTOMATIC || wp==PBT_APMRESUMESUSPEND) {InterlockedExchange(&systemSuspended,FALSE);InterlockedExchange(&scanRequested,TRUE);lastAutomaticRequest=0;}
+        return TRUE;
+    case WM_RUNTIME_STATUS:WriteRuntimeStatus();return 1;
     case WM_DISPLAYCHANGE:case WM_SETTINGCHANGE:if(menuWindow) DestroyWindow(menuWindow);if(hasReading) UpdateTray(&lastReading,TRUE);return 0;
     case WM_DPICHANGED:if(menuWindow) DestroyWindow(menuWindow);if(hasReading) UpdateTray(&lastReading,TRUE);return 0;
     case WM_TRAY:
         if(LOWORD(lp)==WM_CONTEXTMENU) ShowMenu();
-        else if(LOWORD(lp)==NIN_SELECT || LOWORD(lp)==NIN_KEYSELECT) {InterlockedExchange(&scanRequested,TRUE);SetEvent(refreshEvent);}
+        else if(LOWORD(lp)==NIN_SELECT || LOWORD(lp)==NIN_KEYSELECT) {InterlockedExchange(&scanRequested,TRUE);RequestManualRefresh();}
         return 0;
     case WM_COMMAND:
         switch(LOWORD(wp)) {
-        case ID_REFRESH:InterlockedExchange(&scanRequested,TRUE);SetEvent(refreshEvent);break;
+        case ID_REFRESH:InterlockedExchange(&scanRequested,TRUE);RequestManualRefresh();break;
         case ID_STARTUP:ToggleStartup();break;
         case ID_HELP: {wchar_t path[MAX_PATH];_snwprintf(path,MAX_PATH,L"%ls使用说明.txt",folder);ShellExecuteW(h,L"open",path,NULL,NULL,SW_SHOWNORMAL);break;}
         case ID_EXIT:DestroyWindow(h);break;
@@ -170,8 +188,11 @@ static int SelfTest(void) {
     return 0;
 }
 int WINAPI wWinMain(HINSTANCE inst,HINSTANCE previous,LPWSTR command,int show) {
+    while(*command==L' ' || *command==L'\t') command++;
+    wchar_t *end=command+wcslen(command);while(end>command && (end[-1]==L' ' || end[-1]==L'\t')) *--end=0;
     (void)previous;(void)show;instance=inst;GetModuleFileNameW(NULL,exePath,MAX_PATH);wcscpy(folder,exePath);wchar_t *slash=wcsrchr(folder,L'\\');if(slash) slash[1]=0;
-    if(wcscmp(command,L"--self-test")==0) {int code=SelfTest();if(!code) code=AdapterSelfTest();if(!code) code=ColorSelfTest();if(code) return code;return HSVColor(0,1,1)==RGB(255,0,0) && HSVColor(120,1,1)==RGB(0,255,0) && HSVColor(240,1,1)==RGB(0,0,255) && HSVColor(0,0,1)==RGB(255,255,255) && HSVColor(0,1,0)==RGB(0,0,0)?0:56;}
+    if(wcscmp(command,L"--self-test")==0) {int code=SelfTest();if(!code) code=AdapterSelfTest();if(!code) code=ColorSelfTest();if(!code) code=RefreshPolicySelfTest();if(code) return code;return HSVColor(0,1,1)==RGB(255,0,0) && HSVColor(120,1,1)==RGB(0,255,0) && HSVColor(240,1,1)==RGB(0,0,255) && HSVColor(0,0,1)==RGB(255,255,255) && HSVColor(0,1,0)==RGB(0,0,0)?0:56;}
+    if(wcscmp(command,L"--runtime-status")==0) {HWND running=FindWindowW(L"G75BatteryNative",NULL);DWORD_PTR result=0;return running && SendMessageTimeoutW(running,WM_RUNTIME_STATUS,0,0,SMTO_ABORTIFHUNG,2000,&result) && result==1?0:12;}
     if(wcsncmp(command,L"--preview-menu ",15)==0) return PreviewMenu((UINT)_wtoi(command+15));
     stopEvent=CreateEventW(NULL,TRUE,FALSE,NULL);refreshEvent=CreateEventW(NULL,FALSE,FALSE,NULL);if(!stopEvent || !refreshEvent) return 10;
     if(wcscmp(command,L"--probe")==0 || wcscmp(command,L"--bluetooth-probe")==0) {Reading r=wcscmp(command,L"--bluetooth-probe")==0?QueryBluetooth():Query();if(!r.ok && !r.error[0]) wcscpy(r.error,L"Windows 未提供可读取的迈从蓝牙电量");WriteDiagnostic(&r,L"probe-result.txt");CloseHandle(stopEvent);CloseHandle(refreshEvent);return r.ok?0:11;}
@@ -186,9 +207,11 @@ int WINAPI wWinMain(HINSTANCE inst,HINSTANCE previous,LPWSTR command,int show) {
     if(!window) {CloseHandle(mutex);CloseHandle(stopEvent);CloseHandle(refreshEvent);return 12;}
     WNDCLASSW menuClass={0};menuClass.lpfnWndProc=MenuProc;menuClass.hInstance=inst;menuClass.hCursor=LoadCursorW(NULL,IDC_ARROW);menuClass.lpszClassName=L"G75BatteryMenu";menuClass.style=CS_DROPSHADOW;RegisterClassW(&menuClass);
     ZeroMemory(&tray,sizeof(tray));tray.cbSize=sizeof(tray);tray.hWnd=window;tray.uID=1;tray.uCallbackMessage=WM_TRAY;
-    icon=(HICON)LoadImageW(inst,MAKEINTRESOURCEW(1102),IMAGE_ICON,GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),0);iconIndex=102;wcscpy(tray.szTip,L"迈从键盘 · 正在读取");AddTray();
+    RAWINPUTDEVICE keyboard={1,6,RIDEV_INPUTSINK|RIDEV_DEVNOTIFY,window};rawInputRegistered=RegisterRawInputDevices(&keyboard,1,sizeof(keyboard));
+    icon=(HICON)LoadImageW(inst,MAKEINTRESOURCEW(1102),IMAGE_ICON,GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),0);iconIndex=102;wcscpy(tray.szTip,rawInputRegistered?L"迈从键盘 · 等待按键；点击可手动读取":L"迈从键盘 · 请点击手动读取");AddTray();
+    Reading saved={0};if(RestoreLastReading(&saved)) UpdateTray(&saved,TRUE);
     worker=CreateThread(NULL,128*1024,Worker,NULL,STACK_SIZE_PARAM_IS_A_RESERVATION,NULL);
-    if(!worker) {DestroyWindow(window);} else {SetTimer(window,1,30000,NULL);SetEvent(refreshEvent);}
+    if(!worker) {DestroyWindow(window);} else SetTimer(window,1,5000,NULL);
     MSG message;while(GetMessageW(&message,NULL,0,0)>0) {if(colorWindow && IsDialogMessageW(colorWindow,&message)) continue;TranslateMessage(&message);DispatchMessageW(&message);}
     SetEvent(stopEvent);if(worker) {WaitForSingleObject(worker,INFINITE);CloseHandle(worker);}
     while(PeekMessageW(&message,NULL,WM_READING,WM_READING,PM_REMOVE)) HeapFree(GetProcessHeap(),0,(void*)message.lParam);

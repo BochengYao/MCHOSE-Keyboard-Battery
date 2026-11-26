@@ -8,6 +8,7 @@
 *.exe
 *.zip
 probe-result.txt
+runtime-status.txt
 device-inventory.txt
 最近读取.txt
 menu-*.bmp

@@ -1,0 +1,29 @@
+{
+  "version": "1.4.0-preview.3",
+  "measuredOn": "2026-11-26",
+  "device": "G75 V2 + 3837:3033 receiver",
+  "durationSeconds": 187.4976731,
+  "before": {
+    "device_write_calls": "1",
+    "version": "1.4.0-preview.3",
+    "manual_queries": "1",
+    "timer_ticks": "6",
+    "input_queries": "0",
+    "background_query_enabled": "0",
+    "expired_input_queries": "0",
+    "last_matching_input_age_ms": "0",
+    "raw_input_registered": "1"
+  },
+  "after": {
+    "device_write_calls": "1",
+    "version": "1.4.0-preview.3",
+    "manual_queries": "1",
+    "timer_ticks": "43",
+    "input_queries": "0",
+    "background_query_enabled": "0",
+    "expired_input_queries": "0",
+    "last_matching_input_age_ms": "0",
+    "raw_input_registered": "1"
+  },
+  "scope": "Idle query counters only. Physical keyboard standby and automatic input-triggered refresh require user validation."
+}

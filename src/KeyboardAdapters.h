@@ -3,7 +3,7 @@
 #include <devpropdef.h>
 #include "ModelTable.h"
 enum { PROTO_CZ=1,PROTO_QHW,PROTO_LEGACY,PROTO_WIRED };
-typedef struct { wchar_t path[2048],name[64],mode[16];int protocol;USHORT input,output;BOOL shared; } Candidate;
+typedef struct { wchar_t path[2048],name[64],mode[16];int protocol;USHORT input,output;BOOL shared,hasContainer;GUID container; } Candidate;
 static Candidate candidates[16];
 static int candidateCount=0,preferred=-1;
 static volatile LONG scanRequested=TRUE;
@@ -67,11 +67,11 @@ static void ScanCandidates(void) {
         if(!SetupDiEnumDeviceInterfaces(set,NULL,&guid,i,&di)) break;
         SetupDiGetDeviceInterfaceDetailW(set,&di,NULL,0,&size,NULL);if(size<8 || size>16384) continue;
         PSP_DEVICE_INTERFACE_DETAIL_DATA_W detail=HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,size);if(!detail) break;
-        detail->cbSize=sizeof(*detail);
-        if(SetupDiGetDeviceInterfaceDetailW(set,&di,detail,size,NULL,NULL) && wcslen(detail->DevicePath)<2048 && (wcsstr(detail->DevicePath,L"vid_3837") || wcsstr(detail->DevicePath,L"vid_41e4") || wcsstr(detail->DevicePath,L"vid_3554"))) {
+        detail->cbSize=sizeof(*detail);SP_DEVINFO_DATA info={0};info.cbSize=sizeof(info);
+        if(SetupDiGetDeviceInterfaceDetailW(set,&di,detail,size,NULL,&info) && wcslen(detail->DevicePath)<2048 && (wcsstr(detail->DevicePath,L"vid_3837") || wcsstr(detail->DevicePath,L"vid_41e4") || wcsstr(detail->DevicePath,L"vid_3554"))) {
             HANDLE h=CreateFileW(detail->DevicePath,0,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,0,NULL);
             if(h!=INVALID_HANDLE_VALUE) {
-                Candidate c={0};if(Describe(h,&c)) {wcscpy(c.path,detail->DevicePath);candidates[candidateCount++]=c;}CloseHandle(h);
+                Candidate c={0};if(Describe(h,&c)) {wcscpy(c.path,detail->DevicePath);c.hasContainer=ContainerProperty(set,&info,&c.container);candidates[candidateCount++]=c;}CloseHandle(h);
             }
         }
         HeapFree(GetProcessHeap(),0,detail);
@@ -87,7 +87,10 @@ static BOOL Await(HANDLE h,OVERLAPPED *ov,DWORD ms,DWORD *n) {
     return GetOverlappedResult(h,ov,n,FALSE);
 }
 static BOOL SendOnly(HANDLE h,const BYTE *data,DWORD length) {
+    if(!DeviceQueryAllowed()) return FALSE;
     OVERLAPPED ov={0};DWORD n=0;ov.hEvent=CreateEventW(NULL,TRUE,FALSE,NULL);if(!ov.hEvent) return FALSE;
+    if(!DeviceQueryAllowed()) {CloseHandle(ov.hEvent);return FALSE;}
+    InterlockedIncrement64(&deviceWriteCalls);
     BOOL ok=WriteFile(h,data,length,&n,&ov);if(!ok && GetLastError()==ERROR_IO_PENDING) ok=Await(h,&ov,1000,&n);
     CloseHandle(ov.hEvent);return ok && n==length;
 }
@@ -139,6 +142,7 @@ static BOOL MatchQHW(const BYTE *b,DWORD n,void *ctx) {
 }
 static Reading QueryCandidate(const Candidate *c) {
     Reading r={0};BYTE request[1024]={0};
+    if(!DeviceQueryAllowed() || !QueryMatchesContainer(c->hasContainer,&c->container)) return r;
     HANDLE h=CreateFileW(c->path,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,FILE_FLAG_OVERLAPPED,NULL);
     if(h==INVALID_HANDLE_VALUE) return r;
     Candidate verify={0};if(!Describe(h,&verify) || verify.protocol!=c->protocol || verify.input!=c->input || verify.output!=c->output || wcscmp(verify.name,c->name)!=0) goto done;
@@ -197,9 +201,13 @@ static void WriteInventory(void) {
     HANDLE f=CreateFileW(path,GENERIC_WRITE,FILE_SHARE_READ,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);if(f==INVALID_HANDLE_VALUE) return;
     DWORD written;const char *heading="Recognized MCHOSE keyboard HID interfaces (no commands sent; no serials or device paths exported)\r\n";WriteFile(f,heading,(DWORD)strlen(heading),&written,NULL);
     for(int i=0;i<candidateCount;i++) {
-        wchar_t row[256];char utf8[1024];Candidate *c=&candidates[i];_snwprintf(row,256,L"%ls | transport=%ls | protocol=%d | input=%u output=%u\r\n",c->name,c->mode,c->protocol,c->input,c->output);row[255]=0;
+        wchar_t row[256];char utf8[1024];Candidate *c=&candidates[i];_snwprintf(row,256,L"%ls | transport=%ls | protocol=%d | input=%u output=%u | physical_container_known=%d\r\n",c->name,c->mode,c->protocol,c->input,c->output,c->hasContainer);row[255]=0;
         int n=WideCharToMultiByte(CP_UTF8,0,row,-1,utf8,sizeof(utf8),NULL,NULL);if(n>0) WriteFile(f,utf8,n-1,&written,NULL);
     }
+    RAWINPUTDEVICELIST inputs[128];UINT inputCount=128;unsigned accepted=0;
+    UINT returned=GetRawInputDeviceList(inputs,&inputCount,sizeof(inputs[0]));
+    if(returned!=(UINT)-1) for(UINT i=0;i<returned;i++) {GUID container;if(inputs[i].dwType==RIM_TYPEKEYBOARD && KeyboardContainer(inputs[i].hDevice,&container)) accepted++;}
+    char summary[80];int length=snprintf(summary,sizeof(summary),"recognized_input_sources=%u\r\n",accepted);if(length>0 && length<(int)sizeof(summary)) WriteFile(f,summary,(DWORD)length,&written,NULL);
     CloseHandle(f);
 }
 static int AdapterSelfTest(void) {
@@ -221,5 +229,7 @@ static int AdapterSelfTest(void) {
     if(!KnownFamily(L"MCHOSE G75 5.0") || KnownFamily(L"MCHOSE A7 Mouse")) return 41;
     if(sizeof(LEUuid)!=20 || sizeof(LEService)!=24 || sizeof(LECharacteristic)!=36) return 42;
     LEUuid uuid={0};uuid.shortUuid=TRUE;uuid.value.shortValue=0x180f;if(!UuidIs(&uuid,0x180f) || UuidIs(&uuid,0x1812)) return 43;
-    return 0;
+    queryExplicit=FALSE;queryHasContainer=FALSE;BYTE request=0;LONG64 before=InterlockedCompareExchange64(&deviceWriteCalls,0,0);
+    if(SendOnly(INVALID_HANDLE_VALUE,&request,1) || before!=InterlockedCompareExchange64(&deviceWriteCalls,0,0)) return 44;
+    queryExplicit=TRUE;return 0;
 }
